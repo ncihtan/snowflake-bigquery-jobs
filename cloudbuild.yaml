@@ -1,0 +1,17 @@
+# cloudbuild.yaml
+
+substitutions:
+  _JOB_NAME: "unset"
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - "--build-arg"
+      - "JOB_NAME=${_JOB_NAME}"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/${_JOB_NAME}"
+      - "."
+
+images:
+  - "gcr.io/$PROJECT_ID/${_JOB_NAME}"
