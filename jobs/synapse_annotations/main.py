@@ -107,6 +107,7 @@ def write_to_bigquery(results, project_id, dataset_id, table_id):
                         bigquery.SchemaField("value", "STRING", mode="REPEATED"),
                     ],
                 ),
+                bigquery.SchemaField("annotation_count", "INTEGER"),
             ],
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
         )
@@ -186,6 +187,7 @@ def main():
             "name": row[3],
             "component": row[4],
             "annotations": transform_annotations(row[5]),
+            "annotation_count": row[6],
         }
         for row in results
     ]
