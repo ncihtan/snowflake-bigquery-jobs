@@ -139,10 +139,8 @@ def main():
     """
 
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "htan-dcc")
-    dataset_id = "released"
+    dataset_id = "synapse"
     bq_table_id = "synapse_public_status"
-    synapse_table_id = "syn68204896"
-    synapse_dataset_id = "syn68204725"
 
     # Login to Snowflake
     conn = login_to_snowflake()
