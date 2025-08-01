@@ -110,24 +110,9 @@ def main():
     LEFT JOIN SYNAPSE_DATA_WAREHOUSE.SYNAPSE.ACL_LATEST acl2
         ON nl.benefactor_id = acl2.owner_id AND acl2.principal_id = 273948 -- Registered Users
     WHERE nl.PROJECT_ID IN (
-        '21050481', -- HTAN Vanderbilt
-        '22093319', -- HTAN OHSU
-        '22123910', -- HTAN HMS
-        '22124336', -- HTAN BU
-        '22255320', -- HTAN WUSTL
-        '22776798', -- HTAN CHOP
-        '23448901', -- HTAN MSK
-        '23511954', -- HTAN DFCI
-        '23511961', -- HTAN Duke
-        '23511964', -- HTAN Stanford
-        '23511984', -- HTAN PCAPP
-        '24984270', -- HTAN TNP SARDANA
-        '22041595', -- HTAN TNP - TMA
-        '25555889', -- HTAN SRRS
-        '20834712', -- HTAN HTAPP
-        '32596076', -- HTAN Center C
-        '39058831', -- HTAN Data Flow App
-        '52861417'  -- HTAN TNP CASI
+        '68754852', -- HTAN TEST1
+        '68754879', -- HTAN TEST2
+        '68754939', -- HTAN TEST3
     )
     AND node_type = 'file'
     AND (
@@ -138,7 +123,7 @@ def main():
     );
     """
 
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "htan-dcc")
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "htan2-dcc")
     dataset_id = "synapse"
     bq_table_id = "synapse_public_status"
 
