@@ -60,7 +60,7 @@ def format_simple_slack_message(results):
     """
     if not results:
         return {
-            "text": "🔍 HTAN Monitor Bot: No new activity in the last 24 hours",
+            "text": "🔍 HTAN Monitor Bot: No new activity in the last 5 days",
             "username": "HTAN Monitor Bot",
         }
 
@@ -295,7 +295,7 @@ def main():
         # Still show what the message would look like
         slack_message = format_simple_slack_message(results)
         logging.info("Slack message that would be sent:")
-        logging.info(slack_message["text"])
+        logging.info(json.dumps(slack_message))
 
 
 if __name__ == "__main__":
