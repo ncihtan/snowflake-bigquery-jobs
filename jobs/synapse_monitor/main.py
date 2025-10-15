@@ -276,7 +276,7 @@ def main():
     # Run the query in Snowflake
     results = run_snowflake_query(conn, snowflake_query)
 
-    # Print the head of thje results for debugging
+    # Print the head of the results for debugging
     logging.info(f"Query sucessfully executed. Number of rows returned: {len(results)}")
 
     # Print the first 5 rows for debugging
