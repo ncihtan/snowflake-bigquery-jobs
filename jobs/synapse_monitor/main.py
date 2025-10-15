@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import sys
-import logging
 import snowflake.connector
 import pandas as pd
 import dotenv
