@@ -74,7 +74,7 @@ def format_simple_slack_message(results, days_back=1):
     if not results:
         day_text = "day" if days_back == 1 else "days"
         return {
-            "text": f"🔍 HTAN Monitor Bot: No entities were modified in the last {days_back} {day_text}",
+            "text": f"🔍 No entities were modified in the last {days_back} {day_text}",
             "username": "HTAN Monitor Bot",
         }
 
