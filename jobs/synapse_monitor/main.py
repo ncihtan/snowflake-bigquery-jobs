@@ -133,7 +133,11 @@ def format_simple_slack_message(results, days_back=1):
     blocks = []
 
     # Header block with summary
-    header_text = f"📊 *HTAN Synapse Activity Report*\nTESTING ONLY\n\n📈 *Summary*: {total_files} items modified by {unique_users} users across {unique_projects} projects"
+    day_text = "day" if days_back == 1 else "days"
+    item_text = "item" if total_files == 1 else "items"
+    user_text = "user" if unique_users == 1 else "users"
+    project_text = "project" if unique_projects == 1 else "projects"
+    header_text = f"📊 *HTAN Synapse Activity Report*\n📈 *Summary*: {total_files} {item_text} modified in the last {days_back} {day_text} by {unique_users} {user_text} across {unique_projects} {project_text}"
     if use_condensed:
         header_text += f"\n_High activity detected ({total_entries} combinations). Using condensed format._"
 
