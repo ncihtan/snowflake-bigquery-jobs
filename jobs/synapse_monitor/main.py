@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import argparse
+from datetime import datetime, timedelta
 import snowflake.connector
 import pandas as pd
 import dotenv
@@ -66,10 +67,109 @@ def run_snowflake_query(conn, query):
         conn.close()
 
 
-# Format results into a simple Slack message
+def _group_rows(rows):
+    """Group rows into activity dict and ID lookup dicts."""
+    activity = {}
+    user_ids = {}
+    project_ids = {}
+    folder_ids = {}
+    for row in rows:
+        (
+            file_id, file_name, change_type, modified_by_id, username,
+            annotation_count, project_id, project_name, benefactor_id,
+            parent_id, parent_name, parent_type, node_type, created_on,
+        ) = row
+        user_ids[username] = modified_by_id
+        project_ids[project_name] = project_id
+        folder = parent_name if parent_type == "folder" else "root"
+        if parent_type == "folder":
+            folder_ids[(project_name, folder)] = parent_id
+        key = (username, project_name, folder, change_type)
+        activity[key] = activity.get(key, 0) + 1
+    return activity, user_ids, project_ids, folder_ids
+
+
+def _render_activity_blocks(activity, user_ids, project_ids, folder_ids):
+    """Render a grouped activity dict as Slack blocks (condensed or standard)."""
+    blocks = []
+    use_condensed = len(activity) > CONDENSED_FORMAT_THRESHOLD
+
+    if use_condensed:
+        user_project_summary = {}
+        for (username, project_name, folder, change_type), count in activity.items():
+            key = (username, project_name)
+            if key not in user_project_summary:
+                user_project_summary[key] = {"folders": {}, "change_types": {}, "total": 0}
+            user_project_summary[key]["folders"][folder] = user_project_summary[key]["folders"].get(folder, 0) + count
+            user_project_summary[key]["change_types"][change_type] = user_project_summary[key]["change_types"].get(change_type, 0) + count
+            user_project_summary[key]["total"] += count
+
+        sorted_summary = sorted(user_project_summary.items(), key=lambda x: x[1]["total"], reverse=True)
+
+        for (username, project_name), data in sorted_summary[:MAX_USER_PROJECT_COMBINATIONS]:
+            user_link = f"<https://www.synapse.org/Profile:{user_ids[username]}|{username}>"
+            project_link = f"<https://www.synapse.org/Synapse:syn{project_ids[project_name]}|{project_name}>"
+
+            folder_counts = []
+            for folder, count in sorted(data["folders"].items(), key=lambda x: x[1], reverse=True):
+                if folder == "root":
+                    folder_counts.append(f"{count} in root")
+                else:
+                    folder_key = (project_name, folder)
+                    if folder_key in folder_ids:
+                        folder_link = f"<https://www.synapse.org/Synapse:syn{folder_ids[folder_key]}|{folder}>"
+                        folder_counts.append(f"{count} in _{folder_link}_")
+                    else:
+                        folder_counts.append(f"{count} in _{folder}_")
+
+            folder_summary = ", ".join(folder_counts[:MAX_FOLDER_DISPLAY])
+            if len(data["folders"]) > MAX_FOLDER_DISPLAY:
+                folder_summary += f" (+{len(data['folders']) - MAX_FOLDER_DISPLAY} more folders)"
+
+            change_summary = ", ".join(
+                f"{'created' if ct == 'CREATE' else 'modified'} {c}"
+                for ct, c in sorted(data["change_types"].items(), key=lambda x: x[1], reverse=True)
+            )
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{user_link} {change_summary} items: {folder_summary} of {project_link}"}})
+
+        if len(sorted_summary) > MAX_USER_PROJECT_COMBINATIONS:
+            remaining = len(sorted_summary) - MAX_USER_PROJECT_COMBINATIONS
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                "text": f"_{remaining} more user-project combinations..._"}})
+
+    else:
+        sorted_activities = sorted(
+            activity.items(),
+            key=lambda x: (x[1], x[0][0], x[0][1], x[0][2], x[0][3]),
+            reverse=True,
+        )
+        for (username, project_name, folder, change_type), count in sorted_activities:
+            user_link = f"<https://www.synapse.org/Profile:{user_ids[username]}|{username}>"
+            project_link = f"<https://www.synapse.org/Synapse:syn{project_ids[project_name]}|{project_name}>"
+
+            if folder == "root":
+                location = f"the {project_link} project"
+            else:
+                folder_key = (project_name, folder)
+                if folder_key in folder_ids:
+                    folder_link = f"<https://www.synapse.org/Synapse:syn{folder_ids[folder_key]}|{folder}>"
+                    location = f"_{folder_link}_ of the {project_link} project"
+                else:
+                    location = f"_{folder}_ of the {project_link} project"
+
+            verb = "created" if change_type == "CREATE" else "modified"
+            activity_text = f"{user_link} {verb} *{count} item{'s' if count != 1 else ''}* in {location}"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": activity_text}})
+
+    return blocks
+
+
+# Format results into a Slack message with sections per activity type
 def format_simple_slack_message(results, days_back=1):
     """
-    Create a structured Slack message with summary and blocks for each activity
+    Create a structured Slack message with separate sections for record sets
+    modified, files added, and files re-annotated.
     """
     if not results:
         day_text = "day" if days_back == 1 else "days"
@@ -78,197 +178,38 @@ def format_simple_slack_message(results, days_back=1):
             "username": "HTAN Monitor Bot",
         }
 
-    # Group by user, project, folder, and change type
-    user_project_folder_activity = {}
-    user_ids = {}  # Track user IDs for profile links
-    project_ids = {}  # Track project IDs for Synapse links
-    folder_ids = {}  # Track folder IDs for Synapse links
+    lookback = datetime.utcnow() - timedelta(days=days_back)
 
-    for row in results:
-        (
-            file_id,
-            file_name,
-            change_type,
-            modified_by_id,
-            username,
-            annotation_count,
-            project_id,
-            project_name,
-            benefactor_id,
-            parent_id,
-            parent_name,
-            parent_type,
-        ) = row
+    recordsets = [r for r in results if r[12] == "recordset"]
+    files_added = [r for r in results if r[12] == "file" and r[13] >= lookback]
+    files_reannotated = [r for r in results if r[12] == "file" and r[13] < lookback]
 
-        # Store user and project IDs for links
-        user_ids[username] = modified_by_id
-        project_ids[project_name] = project_id
+    all_user_ids = {r[4]: r[3] for r in results}
+    all_project_ids = {r[7]: r[6] for r in results}
+    unique_users = len(all_user_ids)
+    unique_projects = len(all_project_ids)
 
-        # Create key for grouping by user, project, folder, and change type
-        folder = parent_name if parent_type == "folder" else "root"
-
-        # Store folder ID for linking (only if it's actually a folder)
-        if parent_type == "folder":
-            folder_ids[(project_name, folder)] = parent_id
-
-        key = (username, project_name, folder, change_type)
-
-        if key not in user_project_folder_activity:
-            user_project_folder_activity[key] = 0
-
-        user_project_folder_activity[key] += 1
-
-    # Calculate summary stats
-    total_files = sum(user_project_folder_activity.values())
-    unique_users = len(user_ids)
-    unique_projects = len(project_ids)
-    total_entries = len(user_project_folder_activity)
-
-    # Check if we need to use condensed format
-    use_condensed = (
-        total_entries > CONDENSED_FORMAT_THRESHOLD
-    )  # Threshold for switching to condensed format
-
-    # Build blocks message
     blocks = []
-
-    # Header block with summary
-    header_text = f"📊 *HTAN Synapse Activity Report*\nTESTING ONLY\n\n📈 *Summary*: {total_files} items modified by {unique_users} users across {unique_projects} projects"
-    if use_condensed:
-        header_text += f"\n_High activity detected ({total_entries} combinations). Using condensed format._"
-
+    header_text = (
+        f"📊 *HTAN Synapse Activity Report*\n\n"
+        f"📈 *Summary*: {len(results)} items across {unique_users} users and {unique_projects} projects"
+    )
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
 
-    blocks.append({"type": "divider"})
+    sections = [
+        ("📋 *Record Sets Modified*", recordsets),
+        ("📁 *Files Added*", files_added),
+        ("✏️ *Files Re-annotated*", files_reannotated),
+    ]
 
-    if use_condensed:
-        # Condensed format: Group by user-project, list folder counts
-        user_project_summary = {}
-
-        for (
-            username,
-            project_name,
-            folder,
-            change_type,
-        ), count in user_project_folder_activity.items():
-            user_project_key = (username, project_name)
-            if user_project_key not in user_project_summary:
-                user_project_summary[user_project_key] = {
-                    "folders": {},
-                    "change_types": {},
-                    "total": 0,
-                }
-
-            # Track folder activity
-            if folder not in user_project_summary[user_project_key]["folders"]:
-                user_project_summary[user_project_key]["folders"][folder] = 0
-            user_project_summary[user_project_key]["folders"][folder] += count
-
-            # Track change type activity
-            if (
-                change_type
-                not in user_project_summary[user_project_key]["change_types"]
-            ):
-                user_project_summary[user_project_key]["change_types"][change_type] = 0
-            user_project_summary[user_project_key]["change_types"][change_type] += count
-
-            user_project_summary[user_project_key]["total"] += count
-
-        # Sort by total activity (most active first)
-        sorted_summary = sorted(
-            user_project_summary.items(), key=lambda x: x[1]["total"], reverse=True
-        )
-
-        for (username, project_name), data in sorted_summary[
-            :MAX_USER_PROJECT_COMBINATIONS
-        ]:  # Limit to top N most active
-            user_link = (
-                f"<https://www.synapse.org/Profile:{user_ids[username]}|{username}>"
-            )
-            project_link = f"<https://www.synapse.org/Synapse:syn{project_ids[project_name]}|{project_name}>"
-
-            folder_counts = []
-            for folder, count in sorted(
-                data["folders"].items(), key=lambda x: x[1], reverse=True
-            ):
-                if folder == "root":
-                    folder_counts.append(f"{count} in root")
-                else:
-                    # Create folder link if we have the folder ID
-                    folder_key = (project_name, folder)
-                    if folder_key in folder_ids:
-                        folder_link = f"<https://www.synapse.org/Synapse:syn{folder_ids[folder_key]}|{folder}>"
-                        folder_counts.append(f"{count} in _{folder_link}_")
-                    else:
-                        folder_counts.append(f"{count} in _{folder}_")
-
-            folder_summary = ", ".join(
-                folder_counts[:MAX_FOLDER_DISPLAY]
-            )  # Limit to top folders
-            if len(data["folders"]) > MAX_FOLDER_DISPLAY:
-                folder_summary += (
-                    f" (+{len(data['folders'])-MAX_FOLDER_DISPLAY} more folders)"
-                )
-
-            # Create change type summary
-            change_type_summary = []
-            for change_type, count in sorted(
-                data["change_types"].items(), key=lambda x: x[1], reverse=True
-            ):
-                verb = "created" if change_type == "CREATE" else "modified"
-                change_type_summary.append(f"{verb} {count}")
-
-            change_summary = ", ".join(change_type_summary)
-            activity_text = f"{user_link} {change_summary} items: {folder_summary} of {project_link}"
-
-            blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": activity_text}}
-            )
-
-        if len(sorted_summary) > MAX_USER_PROJECT_COMBINATIONS:
-            remaining = len(sorted_summary) - MAX_USER_PROJECT_COMBINATIONS
-            blocks.append(
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"_{remaining} more user-project combinations..._",
-                    },
-                }
-            )
-
-    else:
-        # Standard format: One block per user-project-folder-change_type
-        sorted_activities = sorted(
-            user_project_folder_activity.items(),
-            key=lambda x: (x[1], x[0][0], x[0][1], x[0][2], x[0][3]),
-            reverse=True,  # Sort by count first (most active combinations first)
-        )
-
-        for (username, project_name, folder, change_type), count in sorted_activities:
-            user_link = (
-                f"<https://www.synapse.org/Profile:{user_ids[username]}|{username}>"
-            )
-            project_link = f"<https://www.synapse.org/Synapse:syn{project_ids[project_name]}|{project_name}>"
-
-            if folder == "root":
-                location = f"the {project_link} project"
-            else:
-                # Create folder link if we have the folder ID
-                folder_key = (project_name, folder)
-                if folder_key in folder_ids:
-                    folder_link = f"<https://www.synapse.org/Synapse:syn{folder_ids[folder_key]}|{folder}>"
-                    location = f"_{folder_link}_ of the {project_link} project"
-                else:
-                    location = f"_{folder}_ of the {project_link} project"
-
-            # Choose verb based on change type
-            verb = "created" if change_type == "CREATE" else "modified"
-            activity_text = f"{user_link} {verb} *{count} item{'s' if count != 1 else ''}* in {location}"
-
-            blocks.append(
-                {"type": "section", "text": {"type": "mrkdwn", "text": activity_text}}
-            )
+    for label, rows in sections:
+        if not rows:
+            continue
+        activity, user_ids, project_ids, folder_ids = _group_rows(rows)
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+            "text": f"{label} _{len(rows)} item{'s' if len(rows) != 1 else ''}_"}})
+        blocks.extend(_render_activity_blocks(activity, user_ids, project_ids, folder_ids))
 
     return {
         "blocks": blocks,
