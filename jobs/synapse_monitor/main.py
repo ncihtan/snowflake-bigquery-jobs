@@ -67,6 +67,15 @@ def run_snowflake_query(conn, query):
         conn.close()
 
 
+def _build_folder_path(parent_name, parent_type, gparent_name, gparent_type):
+    """Build a display path like 'scRNA_seq/Level_1' from parent and grandparent."""
+    if parent_type != "folder":
+        return "root"
+    if gparent_type == "folder" and gparent_name:
+        return f"{gparent_name}/{parent_name}"
+    return parent_name
+
+
 def _group_rows(rows):
     """Group rows into activity dict and ID lookup dicts."""
     activity = {}
@@ -77,14 +86,16 @@ def _group_rows(rows):
         (
             file_id, file_name, change_type, modified_by_id, username,
             annotation_count, project_id, project_name, benefactor_id,
-            parent_id, parent_name, parent_type, node_type, created_on,
+            parent_id, parent_name, parent_type,
+            gparent_name, gparent_type,
+            node_type, created_on,
         ) = row
         user_ids[username] = modified_by_id
         project_ids[project_name] = project_id
-        folder = parent_name if parent_type == "folder" else "root"
+        folder_path = _build_folder_path(parent_name, parent_type, gparent_name, gparent_type)
         if parent_type == "folder":
-            folder_ids[(project_name, folder)] = parent_id
-        key = (username, project_name, folder, change_type)
+            folder_ids[(project_name, folder_path)] = parent_id
+        key = (username, project_name, folder_path, change_type)
         activity[key] = activity.get(key, 0) + 1
     return activity, user_ids, project_ids, folder_ids
 
@@ -122,9 +133,7 @@ def _render_activity_blocks(activity, user_ids, project_ids, folder_ids):
                     else:
                         folder_counts.append(f"{count} in _{folder}_")
 
-            folder_summary = ", ".join(folder_counts[:MAX_FOLDER_DISPLAY])
-            if len(data["folders"]) > MAX_FOLDER_DISPLAY:
-                folder_summary += f" (+{len(data['folders']) - MAX_FOLDER_DISPLAY} more folders)"
+            folder_summary = ", ".join(folder_counts)
 
             change_summary = ", ".join(
                 f"{'created' if ct == 'CREATE' else 'modified'} {c}"
@@ -180,9 +189,10 @@ def format_simple_slack_message(results, days_back=1):
 
     lookback = datetime.utcnow() - timedelta(days=days_back)
 
-    recordsets = [r for r in results if r[12] == "recordset"]
-    files_added = [r for r in results if r[12] == "file" and r[13] >= lookback]
-    files_reannotated = [r for r in results if r[12] == "file" and r[13] < lookback]
+    # node_type is index 14, created_on is index 15 (after adding gparent cols at 12,13)
+    recordsets = [r for r in results if r[14] == "recordset"]
+    files_added = [r for r in results if r[14] == "file" and r[15] >= lookback]
+    files_reannotated = [r for r in results if r[14] == "file" and r[15] < lookback]
 
     all_user_ids = {r[4]: r[3] for r in results}
     all_project_ids = {r[7]: r[6] for r in results}
