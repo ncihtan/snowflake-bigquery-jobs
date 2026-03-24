@@ -9,8 +9,8 @@ WITH project_map AS (
     ('HTAN2_Pancreatic', 63298065),
     ('HTAN2_Colorectal', 63298073),
     ('HTAN2_Lymphoma', 63298076),
-    ('HTAN2_Skin', 63298054),
-    ('htan2-testing1', 63834783)
+    ('HTAN2_Skin', 63298054)
+    -- ('htan2-testing1', 63834783)
   AS project_map (PROJECT_NAME, PROJECT_ID)
 )
 
