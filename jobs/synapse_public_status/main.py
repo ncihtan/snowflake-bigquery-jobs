@@ -5,15 +5,17 @@
 import os
 import sys
 import logging
+import time
 import snowflake.connector
 from google.cloud import bigquery
 from dotenv import load_dotenv
 import pandas as pd
 
-# Import Synapse client modules
-
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s - %(funcName)s - %(message)s",
+)
 
 
 # Login to snowflake with PAT
@@ -21,7 +23,7 @@ def login_to_snowflake():
     user = os.getenv("SNOWFLAKE_USER")
     account = os.getenv("SNOWFLAKE_ACCOUNT")
     pat = os.getenv("SNOWFLAKE_PAT")  # Retrieve PAT from .env file
-    print(f"Using user: {user}, account: {account}")
+    logging.info(f"Using user: {user}, account: {account}")
     if not user or not account or not pat:
         logging.error(
             "Missing SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT, or SNOWFLAKE_PAT environment variables."
@@ -42,9 +44,11 @@ def login_to_snowflake():
 def run_snowflake_query(conn, query):
     try:
         cursor = conn.cursor()
+        t0 = time.time()
         cursor.execute(query)
         results = cursor.fetchall()
-        logging.info("Query executed successfully.")
+        elapsed = time.time() - t0
+        logging.info(f"Query executed successfully in {elapsed:.1f}s, returned {len(results)} rows")
         return results
     except Exception as e:
         logging.error(f"Failed to execute query: {e}")
@@ -69,10 +73,14 @@ def write_to_bigquery(results, project_id, dataset_id, table_id):
             ],
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
         )
+        logging.info(f"Loading {len(results)} rows to BigQuery {dataset_id}.{table_id}")
+        t0 = time.time()
         job = client.load_table_from_json(results, table_ref, job_config=job_config)
         job.result()  # Wait for the job to complete
+        elapsed = time.time() - t0
         logging.info(
-            f"Data loaded into BigQuery table {dataset_id}.{table_id} successfully."
+            f"BigQuery load complete in {elapsed:.1f}s: "
+            f"{job.output_rows} rows loaded to {dataset_id}.{table_id}"
         )
     except Exception as e:
         logging.error(f"Failed to write to BigQuery: {e}")
@@ -81,6 +89,8 @@ def write_to_bigquery(results, project_id, dataset_id, table_id):
 
 # Main function to orchestrate the workflow
 def main():
+    logging.info("Starting synapse_public_status job")
+    job_start = time.time()
     # Define your Snowflake query
     snowflake_query = """
     SELECT 
@@ -141,26 +151,22 @@ def main():
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "htan-dcc")
     dataset_id = "synapse"
     bq_table_id = "synapse_public_status"
+    logging.info(f"Target: {project_id}.{dataset_id}.{bq_table_id}")
 
     # Login to Snowflake
     conn = login_to_snowflake()
-    logging.info("Snowflake connection established.")
 
     # Run the query in Snowflake
     results = run_snowflake_query(conn, snowflake_query)
 
-    # Print the head of thje results for debugging
-    logging.info(f"Query sucessfully executed. Number of rows returned: {len(results)}")
-
     # Convert results to a list of dictionaries for BigQuery
+    logging.info(f"Converting {len(results)} rows to BigQuery format")
     results_dict = [
         {"entity_id": row[0], "has_public_view_registered_user_download_acl": row[1]}
         for row in results
     ]
     write_to_bigquery(results_dict, project_id, dataset_id, bq_table_id)
-    logging.info(
-        f"Data successfully written to BigQuery table {project_id}.{dataset_id}.{bq_table_id}."
-    )
+    logging.info(f"synapse_public_status completed in {time.time() - job_start:.1f}s")
 
 
 if __name__ == "__main__":

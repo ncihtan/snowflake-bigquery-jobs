@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import argparse
+import time
 from datetime import datetime, timedelta
 import snowflake.connector
 import pandas as pd
@@ -21,12 +22,12 @@ MAX_FOLDER_DISPLAY = 5
 # Load environment variables from .env file
 dotenv.load_dotenv()
 
-# Load environment variables from .env file
-dotenv.load_dotenv()
 
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+# Configure logging -- JSON format for Cloud Run log parsing
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s - %(funcName)s - %(message)s",
+)
 
 
 # Login to snowflake with PAT
@@ -55,9 +56,11 @@ def login_to_snowflake():
 def run_snowflake_query(conn, query):
     try:
         cursor = conn.cursor()
+        t0 = time.time()
         cursor.execute(query)
         results = cursor.fetchall()
-        logging.info("Query executed successfully.")
+        elapsed = time.time() - t0
+        logging.info(f"Query executed successfully in {elapsed:.1f}s, returned {len(results)} rows")
         return results
     except Exception as e:
         logging.error(f"Failed to execute query: {e}")
@@ -78,6 +81,7 @@ def _build_folder_path(parent_name, parent_type, gparent_name, gparent_type):
 
 def _group_rows(rows):
     """Group rows into activity dict and ID lookup dicts."""
+    logging.info(f"Grouping {len(rows)} rows into activity buckets")
     activity = {}
     user_ids = {}
     project_ids = {}
@@ -97,6 +101,10 @@ def _group_rows(rows):
             folder_ids[(project_name, folder_path)] = parent_id
         key = (username, project_name, folder_path, change_type)
         activity[key] = activity.get(key, 0) + 1
+    logging.info(
+        f"Grouped into {len(activity)} activity keys, "
+        f"{len(user_ids)} users, {len(project_ids)} projects, {len(folder_ids)} folders"
+    )
     return activity, user_ids, project_ids, folder_ids
 
 
@@ -104,6 +112,10 @@ def _render_activity_blocks(activity, user_ids, project_ids, folder_ids):
     """Render a grouped activity dict as Slack blocks (condensed or standard)."""
     blocks = []
     use_condensed = len(activity) > CONDENSED_FORMAT_THRESHOLD
+    logging.info(
+        f"Rendering {len(activity)} activity entries, "
+        f"format={'condensed' if use_condensed else 'standard'} (threshold={CONDENSED_FORMAT_THRESHOLD})"
+    )
 
     if use_condensed:
         user_project_summary = {}
@@ -144,6 +156,7 @@ def _render_activity_blocks(activity, user_ids, project_ids, folder_ids):
 
         if len(sorted_summary) > MAX_USER_PROJECT_COMBINATIONS:
             remaining = len(sorted_summary) - MAX_USER_PROJECT_COMBINATIONS
+            logging.info(f"Condensed format: showing {MAX_USER_PROJECT_COMBINATIONS} of {len(sorted_summary)} user-project combinations, {remaining} truncated")
             blocks.append({"type": "section", "text": {"type": "mrkdwn",
                 "text": f"_{remaining} more user-project combinations..._"}})
 
@@ -171,6 +184,7 @@ def _render_activity_blocks(activity, user_ids, project_ids, folder_ids):
             activity_text = f"{user_link} {verb} *{count} item{'s' if count != 1 else ''}* in {location}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": activity_text}})
 
+    logging.info(f"Rendered {len(blocks)} Slack blocks")
     return blocks
 
 
@@ -180,19 +194,26 @@ def format_simple_slack_message(results, days_back=1):
     Create a structured Slack message with separate sections for record sets
     modified, files added, and files re-annotated.
     """
+    logging.info(f"Formatting Slack message: {len(results)} results, days_back={days_back}")
     if not results:
         day_text = "day" if days_back == 1 else "days"
+        logging.info("No results to report")
         return {
             "text": f"🔍 No entities were modified in the last {days_back} {day_text}",
             "username": "HTAN Monitor Bot",
         }
 
     lookback = datetime.utcnow() - timedelta(days=days_back)
+    logging.info(f"Lookback cutoff for file age: {lookback.isoformat()}")
 
     # node_type is index 14, created_on is index 15 (after adding gparent cols at 12,13)
     recordsets = [r for r in results if r[14] == "recordset"]
     files_added = [r for r in results if r[14] == "file" and r[15] >= lookback]
     files_reannotated = [r for r in results if r[14] == "file" and r[15] < lookback]
+    logging.info(
+        f"Categorized: {len(recordsets)} recordsets, "
+        f"{len(files_added)} files added, {len(files_reannotated)} files re-annotated"
+    )
 
     all_user_ids = {r[4]: r[3] for r in results}
     all_project_ids = {r[7]: r[6] for r in results}
@@ -200,8 +221,9 @@ def format_simple_slack_message(results, days_back=1):
     unique_projects = len(all_project_ids)
 
     blocks = []
+    day_text = "day" if days_back == 1 else "days"
     header_text = (
-        f"📊 *HTAN Synapse Activity Report*\n\n"
+        f"📊 *HTAN Synapse Activity Report* (last {days_back} {day_text})\n\n"
         f"📈 *Summary*: {len(results)} items across {unique_users} users and {unique_projects} projects"
     )
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
@@ -234,12 +256,17 @@ def send_slack_message(webhook_url, message):
     Send a message to Slack via webhook
     """
     try:
+        payload_size = len(json.dumps(message))
+        block_count = len(message.get("blocks", []))
+        logging.info(f"Sending Slack message: {block_count} blocks, {payload_size} bytes")
         response = requests.post(webhook_url, json=message)
         response.raise_for_status()
-        logging.info("Slack message sent successfully")
+        logging.info(f"Slack message sent successfully (HTTP {response.status_code})")
         return True
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to send Slack message: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            logging.error(f"Slack response: status={e.response.status_code}, body={e.response.text[:500]}")
         return False
 
 
@@ -296,6 +323,9 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    logging.info(f"Starting synapse_monitor: days_back={args.days_back}, verbose={args.verbose}")
+    job_start = time.time()
+
     # Determine query file path
     if args.query_file:
         query_file_path = args.query_file
@@ -313,18 +343,15 @@ def main():
     # Run the query in Snowflake
     results = run_snowflake_query(conn, snowflake_query)
 
-    # Print the head of the results for debugging
-    logging.info(
-        f"Query successfully executed. Number of rows returned: {len(results)}"
-    )
-
-    # Print the first 5 rows for debugging
+    # Log sample rows for debugging
+    logging.debug(f"First 5 rows:")
     for row in results[:5]:
-        logging.info(row)
+        logging.debug(row)
 
     # Format and send Slack message
     slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     if slack_webhook_url:
+        logging.info("SLACK_WEBHOOK_URL is set, will send notification")
         slack_message = format_simple_slack_message(results, args.days_back)
         send_slack_message(slack_webhook_url, slack_message)
     else:
@@ -335,6 +362,8 @@ def main():
         slack_message = format_simple_slack_message(results, args.days_back)
         logging.info("Slack message that would be sent:")
         logging.info(json.dumps(slack_message))
+
+    logging.info(f"synapse_monitor completed in {time.time() - job_start:.1f}s")
 
 
 if __name__ == "__main__":
